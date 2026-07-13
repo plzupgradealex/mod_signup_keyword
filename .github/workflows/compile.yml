@@ -1,10 +1,11 @@
-# Compiles mod_signup_keyword.erl against real ejabberd 26.04 source on every
-# push and PR. Fails on any compile error; treats the "behaviour gen_mod
-# undefined" warning as expected (it resolves at load time inside ejabberd).
+# Compiles mod_signup_keyword.erl against a fully-built ejabberd 26.04 on
+# every push and PR. This mirrors what an operator does: build ejabberd,
+# then compile the module against its headers and deps, drop the beam in ebin.
 #
-# This mirrors what an operator does: pull ejabberd, compile the module
-# against its headers, drop the beam in ebin/. If this CI passes, the module
-# will compile for anyone following the README's install steps.
+# We do a real `configure && make` of ejabberd because the module's includes
+# depend on ejabberd's deps (xmpp, fast_xml, etc.) being present. A shallow
+# `rebar3 get-deps` doesn't reliably populate them — the deps are pulled by
+# ejabberd's configure/autoreconf step.
 name: compile
 
 on:
@@ -19,63 +20,69 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Erlang/OTP
-        uses: erlef/setup-beam@v1
+      - name: Install build deps + Erlang/OTP
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential automake autoconf libtool flex \
+            libssl-dev libexpat1-dev libyaml-dev \
+            zlib1g-dev libgd-dev
+      - uses: erlef/setup-beam@v1
         with:
           otp-version: "27"
-          # No rebar3 needed — we compile with erlc directly, same as the
-          # README's install instructions.
 
-      - name: Cache ejabberd source
+      - name: Cache ejabberd build
+        id: cache-ejabberd
         uses: actions/cache@v4
         with:
           path: ejabberd
-          key: ejabberd-26.04-src
+          key: ejabberd-26.04-built-${{ runner.os }}-otp27-v1
 
-      - name: Fetch ejabberd 26.04 source
+      - name: Clone + build ejabberd 26.04
+        if: steps.cache-ejabberd.outputs.cache-hit != 'true'
         run: |
-          if [ ! -d ejabberd/.git ]; then
-            git clone --depth 1 --branch 26.04 https://github.com/processone/ejabberd.git
-          fi
-          # Pull in deps headers (xmpp, fast_xml, etc.) via the build tree.
-          # ejabberd's deps are vendored at build time; for header-only
-          # compilation we only need the include dirs, which exist after
-          # a configure. We skip configure and point erlc at the source
-          # layout directly — the .hrl files we need (xmpp_codec.hrl with
-          # the #register/#xdata records) are in the deps checked out by
-          # rebar3. Run rebar3 fetch to populate them.
+          git clone --depth 1 --branch 26.04 https://github.com/processone/ejabberd.git
           cd ejabberd
-          if [ ! -d _build/default/lib/xmpp/include ]; then
-            # rebar3 is available via setup-beam; use it to fetch deps
-            # without compiling (we only need headers).
-            rebar3 get-deps || true
-          fi
+          # Full build: configure pulls deps via autoreconf, make compiles
+          # everything including the xmpp/ fast_xml/ etc. deps whose .hrl
+          # files we need (xmpp_codec.hrl has the #register/#xdata records).
+          ./autogen.sh
+          ./configure --enable-all
+          make
 
-      - name: Compile module
+      - name: Compile mod_signup_keyword
         run: |
           EJ=ejabberd
+          mkdir -p /tmp/ebin
           erlc \
             -I "$EJ/include" \
             -I "$EJ/_build/default/lib" \
+            -I "$EJ" \
             -Wall \
             -o /tmp/ebin \
             src/mod_signup_keyword.erl
           # Fail if no beam was produced.
-          test -f /tmp/ebin/mod_signup_keyword.beam
+          test -f /tmp/ebin/mod_signup_keyword.beam && echo "beam produced OK"
 
       - name: Check for unexpected errors
         run: |
-          # Recompile capturing stderr; fail on any "error:" line.
-          # The "behaviour gen_mod undefined" WARNING is expected and allowed.
+          # Recompile capturing stderr; fail on any compile error.
+          # The "behaviour gen_mod undefined" WARNING is expected (it
+          # resolves at load time when ejabberd's gen_mod is on the code path)
+          # and is filtered out below.
           mkdir -p /tmp/compile-check
           output=$(erlc \
             -I ejabberd/include \
             -I ejabberd/_build/default/lib \
+            -I ejabberd \
             -o /tmp/compile-check \
             src/mod_signup_keyword.erl 2>&1) || true
           echo "$output"
-          if echo "$output" | grep -E "^[^:]+\.erl:[0-9]+:.*error:" ; then
+          # Filter out the expected gen_mod warning, then check for errors.
+          errors=$(echo "$output" | grep -vE "behaviour gen_mod undefined" | grep -E "error:" || true)
+          if [ -n "$errors" ]; then
             echo "FAIL: compile errors found"
+            echo "$errors"
             exit 1
           fi
           echo "OK: no compile errors"
