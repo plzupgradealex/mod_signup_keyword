@@ -250,7 +250,7 @@ def run(args):
         else:
             cond = iq_error_condition(good[0])
             if cond == "wait":
-                _fail(results, f"rate-limited (registration_timeout). "
+                _fail(results, f"rate-limited (registration_timeout_ms). "
                                f"Wait {args.ratelimit_wait}s and re-run. "
                                f"Condition={cond}")
             else:
@@ -269,7 +269,7 @@ def run(args):
         if iq_type(dup[0]) == "error" and cond == "conflict":
             _ok(results, "duplicate rejected as expected (conflict)")
         elif cond == "wait":
-            print(f"  SKIP: rate-limited (registration_timeout). "
+            print(f"  SKIP: rate-limited (registration_timeout_ms). "
                   f"Account WAS created in test 3 -- rerun later to verify "
                   f"conflict path.")
         else:
@@ -316,7 +316,7 @@ def main():
     ap.add_argument("--form-only", action="store_true",
                     help="only GET and print the form; don't attempt registration")
     ap.add_argument("--ratelimit-wait", type=int, default=15,
-                    help="seconds to wait between submissions (registration_timeout)")
+                    help="seconds to wait between submissions (registration_timeout_ms)")
     args = ap.parse_args()
 
     if not args.form_only and not args.keyword:

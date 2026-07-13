@@ -40,7 +40,10 @@ it. This is by design (lowest-friction onboarding) but it's strictly weaker
 than XEP-0445 per-person tokens. Mitigations built in:
 
 - **Constant-time** keyword comparison (no timing side-channel)
-- **Per-IP rate limiting** via ejabberd's `registration_timeout`
+- **Per-IP rate limiting** via the module's `registration_timeout_ms` option
+  (the module implements its own throttle — ejabberd's top-level
+  `registration_timeout` does **not** apply, because it's enforced inside
+  `mod_register`, which this module replaces)
 - **Failed-attempt logging** (IP + username; the keyword itself is never logged)
 - **On-box-only keyword storage** (never in source control)
 - **Rotation** by editing config + restarting
@@ -95,10 +98,11 @@ modules:
       - support
       - info
     instructions: "Enter your chosen username, password, and the signup keyword."
+    registration_timeout_ms: 600000  # per-IP rate limit (ms). 600000 = 10 min.
 
-# Per-IP rate limit on registration attempts (seconds). 600 = one attempt
-# per 10 minutes per source IP. Strongly recommended.
-registration_timeout: 600
+# NOTE: ejabberd's top-level registration_timeout does NOT apply to this
+# module (it's enforced inside mod_register, which we don't load). Use the
+# module's registration_timeout_ms option above instead.
 ```
 
 **Do NOT load `mod_register` at the same time** — both modules register the
@@ -136,6 +140,7 @@ python3 scripts/test-ibr-keyword.py --host your.host --keyword 'your-shared-keyw
 | `welcome_message` | binary | `"Welcome! ..."` | Message body sent to a newly registered user. Empty string to disable. |
 | `reserved_users` | `[binary]` | *(common admin names)* | Usernames that can't be registered even with the right keyword. |
 | `instructions` | binary | *(auto-generated)* | Instructions text shown in the registration form. |
+| `registration_timeout_ms` | `pos_int \| infinity` | `600000` (10 min) | Minimum milliseconds between attempts from the same source IP. `infinity` disables (not recommended). This is the module's own throttle; ejabberd's top-level `registration_timeout` does not apply. |
 
 ## How it works
 

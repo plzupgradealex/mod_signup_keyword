@@ -9,7 +9,7 @@
 #   0. Preflight: refuses to run if the keyword is still the placeholder.
 #   1. Compiles mod_signup_keyword.erl on-box (OTP 27) -> $BUILD/ebin/.
 #   2. Backs up the live config: ejabberd.yml -> ejabberd.yml.bak.signup-keyword.
-#   3. Merges the mod_signup_keyword block + registration_timeout into the live
+#   3. Merges the mod_signup_keyword block + registration_timeout_ms into the live
 #      config (in place; keyword injected from the KEYWORD env var).
 #   4. Clean stop: stopsrc -> wait for active->inoperative -> kill strays ->
 #      sleep 3 (the exact sequence from apply-ejabberd-config.ksh:20-24).
@@ -114,7 +114,7 @@ ls -l "$BAK"
 #     the keyword substituted in. This is cleaner than sed-patching the live
 #     file because the live file may have drifted (api keys, secrets edited
 #     on-box). Instead we do a surgical sed: only touch the keyword line and
-#     ensure the module block + registration_timeout exist.
+#     ensure the module block + registration_timeout_ms exist.
 #
 # We assume the live config already has the mod_signup_keyword block (installed
 # by copying scripts/ejabberd-production.yml on-box in a prior step, or merged
@@ -132,7 +132,7 @@ else
     echo "=== mod_signup_keyword block NOT in live config ==="
     echo "The live config must contain the mod_signup_keyword block before running."
     echo "Copy scripts/ejabberd-production.yml to the box and diff against $CONFIG,"
-    echo "merging the modules.mod_signup_keyword + registration_timeout changes."
+    echo "merging the modules.mod_signup_keyword + registration_timeout_ms changes."
     echo "Restoring from backup (no changes made)."
     cp "$BAK" "$CONFIG"
     exit 4

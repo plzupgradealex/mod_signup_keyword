@@ -6,10 +6,6 @@
 ## IMPORTANT: do NOT also load mod_register. This module owns the
 ## jabber:iq:register IQ namespace.
 
-## Per-IP rate limit on registration attempts (seconds).
-## 600 = one attempt per 10 minutes per source IP. Strongly recommended.
-registration_timeout: 600
-
 modules:
   # ... your other modules (mod_roster, mod_ping, etc.) ...
 
@@ -35,6 +31,11 @@ modules:
       - server
       - register
       - bot
+
+    ## Per-IP rate limit (milliseconds). 600000 = one attempt per 10 min.
+    ## Set to `infinity` to disable (NOT recommended).
+    ## NOTE: ejabberd's top-level registration_timeout does NOT apply here.
+    registration_timeout_ms: 600000
 
     ## Instructions shown in the registration form. Defaults to a sensible
     ## string if omitted.

@@ -9,9 +9,9 @@
 %%% which is the wrong shape for "give every friend the same word."
 %%%
 %%% Trade-off: if the keyword leaks, anyone who finds the host can register.
-%%% Mitigations: constant-time comparison, ejabberd's registration_timeout
-%%% (built-in per-IP rate limit), failed-attempt logging (keyword never
-%%% logged), and keyword rotation by editing the on-box config.
+%%% Mitigations: constant-time comparison, the module's own per-IP rate
+%%% limit (registration_timeout_ms option), failed-attempt logging (keyword
+%%% never logged), and keyword rotation by editing the on-box config.
 %%%
 %%% Wire protocol (XEP-0004 data form inside jabber:iq:register):
 %%%
@@ -71,6 +71,9 @@
 %% hooks and iq handler
 -export([stream_feature_register/2, process_iq/1, c2s_unauthenticated_packet/2]).
 
+%% ETS table name for per-IP rate limiting.
+-define(RATE_TABLE, mod_signup_keyword_rate).
+
 %% helpers (exported for the shell / tests)
 -export([constant_time_eq/2, extract_field/2]).
 
@@ -93,6 +96,16 @@
 %%%===================================================================
 
 start(Host, _Opts) ->
+    %% Per-IP rate-limit table (bag: {IP, LastAttemptMs}). Guarded by
+    %% whereis so a second vhost start doesn't crash on duplicate table.
+    %% Modeled on mod_agents' ETS setup.
+    case ets:whereis(?RATE_TABLE) of
+        undefined ->
+            ets:new(?RATE_TABLE, [named_table, public, set,
+                                  {read_concurrency, true}]);
+        _ ->
+            ok
+    end,
     %% Register the unauthenticated-packet hook EXPLICITLY (not via the
     %% {hook,...} gen_mod return tuple). The gen_mod tuple machinery registers
     %% on the host key passed to start/2, but ejabberd_c2s registers its own
@@ -109,6 +122,7 @@ start(Host, _Opts) ->
 stop(Host) ->
     ejabberd_hooks:delete(c2s_unauthenticated_packet, Host, ?MODULE,
                           c2s_unauthenticated_packet, 50),
+    %% Leave the ETS table for other vhosts; it's reclaimed on full node stop.
     ok.
 
 reload(_Host, _NewOpts, _OldOpts) ->
@@ -191,14 +205,14 @@ process_iq(#iq{type = get, to = To} = IQ) ->
     Form = signup_form(Server),
     Register = #register{instructions = Instructions, xdata = Form},
     xmpp:make_iq_result(IQ, Register);
-process_iq(#iq{type = set, lang = Lang, to = To, from = From,
+process_iq(#iq{type = set, lang = Lang, to = To,
                sub_els = [SubEl]} = IQ) ->
     %% SET: validate keyword, then create account.
     %% SubEl is the first (and usually only) child of <query>, already decoded
     %% to a record by the XMPP codec. Match directly -- don't call try_subtag
     %% (that searches INSIDE an element, but SubEl IS the element).
     Server = To#jid.lserver,
-    Source = source_ip(From, IQ),
+    Source = source_ip(IQ),
     try
         case SubEl of
             #register{xdata = #xdata{type = submit, fields = Fields}} ->
@@ -239,6 +253,27 @@ handle_register(IQ, Lang, Server, Source, Fields) ->
     Password = extract_field(?F_PASSWORD, Fields),
     Keyword  = extract_field(?F_KEYWORD,  Fields),
     Expected = gen_mod:get_module_opt(Server, ?MODULE, keyword),
+    %% Per-IP rate limit. We check BEFORE keyword validation so wrong-keyword
+    %% attempts are throttled too (otherwise the keyword could be brute-forced
+    %% unthrottled). IMPORTANT: ejabberd's top-level registration_timeout does
+    %% NOT apply to this module (it's enforced inside mod_register, which we
+    %% don't load), so we implement our own.
+    RateMs = gen_mod:get_module_opt(Server, ?MODULE, registration_timeout_ms),
+    case check_rate(Source, RateMs) of
+        false ->
+            log_failed(Server, Username, Source, rate_limited),
+            make_error(IQ, xmpp:err_resource_constraint(
+                             ?T("Too many registration attempts; "
+                                "please wait and try again"), Lang));
+        true ->
+            do_register(IQ, Lang, Server, Source, Username, Password,
+                        Keyword, Expected)
+    end.
+
+-spec do_register(iq(), binary(), binary(),
+                  undefined | {inet:ip_address(), non_neg_integer()},
+                  binary(), binary(), binary(), binary()) -> iq().
+do_register(IQ, Lang, Server, Source, Username, Password, Keyword, Expected) ->
     case {Username, Password, Keyword} of
         {<<>>, _, _} ->
             make_error(IQ, xmpp:err_bad_request(?T("Missing username"), Lang));
@@ -286,6 +321,45 @@ handle_register(IQ, Lang, Server, Source, Fields) ->
                     end
             end
     end.
+
+%% Per-source-IP throttle. Returns false if the same IP attempted within the
+%% last RateMs milliseconds; true otherwise (and records the attempt).
+%% Unknown/loopback source (e.g., proxied without IP) is always allowed --
+%% the operator must ensure IP forwarding from their proxy if they want the
+%% throttle to engage.
+-spec check_rate(undefined | {inet:ip_address(), non_neg_integer()},
+                 non_neg_integer()) -> boolean().
+check_rate(_Source, infinity) ->
+    true;
+check_rate({IP, _Port}, RateMs) when RateMs =/= infinity ->
+    Now = erlang:system_time(millisecond),
+    Key = {ip, IP},
+    case ets:lookup(?RATE_TABLE, Key) of
+        [{_, Last}] when (Now - Last) < RateMs ->
+            false;
+        _ ->
+            ets:insert(?RATE_TABLE, {Key, Now}),
+            %% Opportunistic sweep: if the table has grown, delete entries
+            %% older than 2x the window. Keeps memory bounded under abuse.
+            case ets:info(?RATE_TABLE, size) of
+                S when S > 1024 -> sweep_rate(RateMs * 2);
+                _ -> ok
+            end,
+            true
+    end;
+check_rate(undefined, _RateMs) ->
+    true.
+
+-spec sweep_rate(non_neg_integer()) -> ok.
+sweep_rate(OlderThanMs) ->
+    Now = erlang:system_time(millisecond),
+    ets:foldl(
+      fun({{ip, _} = Key, Last}, _) when (Now - Last) >= OlderThanMs ->
+              ets:delete(?RATE_TABLE, Key);
+         (_, _) ->
+              ok
+      end, ok, ?RATE_TABLE),
+    ok.
 
 %% Constant-time comparison so timing cannot leak the keyword byte-by-byte.
 %% Length is already public (the form advertises a keyword field, not its
@@ -426,15 +500,17 @@ fmt_source({IP, _Port}) ->
 %%% Helpers
 %%%===================================================================
 
-%% Recover the peer IP from the IQ metadata if present (set by c2s).
--spec source_ip(jid:jid() | undefined, iq()) ->
+%% Recover the peer IP from the IQ metadata (set by the c2s hook). The IQ
+%% itself is the authoritative source -- the From JID is the empty server JID
+%% in the unauthenticated path, so it carries no address info.
+-spec source_ip(iq()) ->
     undefined | {inet:ip_address(), non_neg_integer()}.
-source_ip(_From, #iq{meta = Meta}) when is_map(Meta) ->
+source_ip(#iq{meta = Meta}) when is_map(Meta) ->
     case maps:get(ip, Meta, undefined) of
         {_, _} = IP -> IP;
         _ -> undefined
     end;
-source_ip(_, _) ->
+source_ip(_) ->
     undefined.
 
 -spec make_error(iq(), stanza_error()) -> iq().
@@ -453,6 +529,8 @@ mod_opt_type(reserved_users) ->
     econf:list(econf:binary());
 mod_opt_type(instructions) ->
     econf:binary();
+mod_opt_type(registration_timeout_ms) ->
+    econf:pos_int(infinity);
 mod_opt_type(_) ->
     [].
 
@@ -461,11 +539,18 @@ mod_options(Host) ->
      {welcome_message,
       <<"Welcome. Your account is ready. Add your friends' "
         "JIDs to start chatting.">>},
+     %% Default reserved names: common administrative/service usernames only.
+     %% Operators should add their own personal handles.
      {reserved_users,
       [<<"admin">>, <<"administrator">>, <<"root">>, <<"signup">>,
        <<"ejabberd">>, <<"info">>, <<"support">>, <<"help">>, <<"postmaster">>,
        <<"system">>, <<"host">>, <<"server">>, <<"register">>, <<"bot">>,
-       <<"alex">>, <<"www">>, <<"mail">>]},
+       <<"www">>, <<"mail">>]},
+     %% Per-IP rate limit, in milliseconds. Default 600000 = 10 min between
+     %% attempts. Set to `infinity` to disable (NOT recommended).
+     %% NOTE: ejabberd's top-level registration_timeout does NOT apply to this
+     %% module (it's enforced inside mod_register, which we don't load).
+     {registration_timeout_ms, 600000},
      %% Mirrors the signup web app's instruction text.
      {instructions,
       iolist_to_binary(
@@ -479,9 +564,11 @@ mod_doc() ->
              "in constant time, then creates the account via the normal "
              "ejabberd auth stack. NOT XEP-0445: the keyword is reusable, "
              "not a single-use invite token. If the keyword leaks, anyone "
-             "who finds the host can register -- mitigate with "
-             "registration_timeout (built-in per-IP rate limit) and "
-             "periodic keyword rotation."),
+             "who finds the host can register -- mitigate with the "
+             "registration_timeout_ms option (per-IP rate limit) and "
+             "periodic keyword rotation. IMPORTANT: ejabberd's top-level "
+             "registration_timeout does NOT apply to this module; use "
+             "registration_timeout_ms instead."),
       opts =>
           [{keyword,
             #{value => ?T("binary"), required => true,
@@ -499,6 +586,14 @@ mod_doc() ->
               desc =>
                   ?T("Usernames that cannot be registered even with the "
                      "right keyword.")}},
+           {registration_timeout_ms,
+            #{value => ?T("pos_integer | infinity"),
+              desc =>
+                  ?T("Minimum milliseconds between registration attempts "
+                     "from the same source IP. Default 600000 (10 min). "
+                     "Set to infinity to disable (NOT recommended). This "
+                     "is the module's own throttle -- ejabberd's top-level "
+                     "registration_timeout does not apply here.")}},
            {instructions,
             #{value => ?T("binary"),
               desc => ?T("Instructions text in the registration form.")}}]}.

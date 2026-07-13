@@ -144,9 +144,9 @@ Example (wrong keyword):
 
 ## Rate limiting
 
-The server enforces `registration_timeout` — a per-IP cooldown between
-registration attempts. The default in the example config is **600 seconds
-(10 minutes)**.
+The server enforces `registration_timeout_ms` — a per-IP cooldown between
+registration attempts, implemented inside the module. The default is
+**600000 ms (10 minutes)**.
 
 When the user hits `<resource-constraint/>` (`type='wait'`):
 - Surface the wait time clearly ("Please wait 10 minutes before trying again")
@@ -155,6 +155,10 @@ When the user hits `<resource-constraint/>` (`type='wait'`):
 
 The rate limit is **per source IP**, so users behind the same NAT share a
 budget. This is intentional (brute-force protection on the keyword).
+
+Note: ejabberd's top-level `registration_timeout` option does **not** apply
+to this module (it's enforced inside `mod_register`, which this module
+replaces). The module has its own `registration_timeout_ms` option.
 
 ---
 
