@@ -40,7 +40,10 @@ jobs:
           mkdir -p ejabberd/_build/default/lib
           git clone --depth 1 https://github.com/processone/xmpp.git \
             ejabberd/_build/default/lib/xmpp
-          # p1_xmpp itself includes from a sibling pkix dep in one place;
+          # xmpp.hrl includes fast_xml/include/fxml.hrl — fetch it.
+          git clone --depth 1 https://github.com/processone/fast_xml.git \
+            ejabberd/_build/default/lib/fast_xml
+          # p1_xmpp includes from a sibling pkix dep in one place;
           # fetch it too so includes resolve.
           git clone --depth 1 https://github.com/processone/pkix.git \
             ejabberd/_build/default/lib/pkix
