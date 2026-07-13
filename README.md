@@ -1,5 +1,7 @@
 # mod_signup_keyword
 
+![compile](https://github.com/plzupgradealex/mod_signup_keyword/actions/workflows/compile.yml/badge.svg)
+
 Keyword-gated In-Band Registration for [ejabberd](https://www.ejabberd.im/).
 
 A custom ejabberd module that lets you gate XEP-0077 account registration behind
