@@ -1,0 +1,10 @@
+# Compiled beams (build artifact, not source)
+*.beam
+
+# Erlang crash dumps
+erl_crash.dump
+
+# Editor/OS noise
+.DS_Store
+*~
+.*.swp
