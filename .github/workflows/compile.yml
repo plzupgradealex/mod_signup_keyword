@@ -38,7 +38,7 @@ jobs:
           # records). Place it where -I ejabberd/_build/default/lib finds it,
           # mirroring the built-tree layout the module's -include_lib expects.
           mkdir -p ejabberd/_build/default/lib
-          git clone --depth 1 https://github.com/processone/p1_xmpp.git \
+          git clone --depth 1 https://github.com/processone/xmpp.git \
             ejabberd/_build/default/lib/xmpp
           # p1_xmpp itself includes from a sibling pkix dep in one place;
           # fetch it too so includes resolve.
